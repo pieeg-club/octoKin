@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "octokin"
+version = "0.1.0"
+description = "Open-source human physiological feedback for ROS 2, NVIDIA Isaac Sim, and robot learning — powered by PiEEG Octopus-16."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "PiEEG", email = "pieeg@pieeg.com"},
+]
+keywords = [
+    "robotics",
+    "ros2",
+    "isaac-sim",
+    "isaac-lab",
+    "reinforcement-learning",
+    "human-in-the-loop",
+    "eeg",
+    "emg",
+    "biosignals",
+    "pieeg",
+    "octopus-16",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Human Machine Interfaces",
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+ble = [
+    "bleak>=0.21",
+]
+rl = [
+    "gymnasium>=0.29",
+]
+dev = [
+    "bleak>=0.21",
+    "pytest>=7.4",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+octokin = "octokin.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/pieeg-club/octoKin"
+Documentation = "https://docs.pieeg.com/hardware/devices/Octopus_16/"
+Hardware = "https://www.pieeg.com/hardware"
+Repository = "https://github.com/pieeg-club/octoKin"
+Issues = "https://github.com/pieeg-club/octoKin/issues"
+
+[tool.setuptools.packages.find]
+include = ["octokin*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
