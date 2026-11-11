@@ -107,6 +107,13 @@ def test_rl_wrapper_shapes_rewards_and_gates_bad_contact() -> None:
     assert truncated_clench is True
     assert reward_clench < 0.0
 
+    # 3) Resetting after intervention must NOT leak stale clench truncation into new episode
+    env.reset()
+    _, reward_after_reset, _, truncated_after_reset, info_after_reset = env.step(0.5)
+    assert info_after_reset["octokin"]["intervention"] is False
+    assert truncated_after_reset is False
+    assert pytest.approx(reward_after_reset) == 1.0
+
 
 def test_cli_check_and_stream_record_replay(tmp_path: Path, capsys) -> None:
     csv_path = tmp_path / "cli_rec.csv"

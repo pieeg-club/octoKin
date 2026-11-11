@@ -93,3 +93,21 @@ def test_double_blink_requires_two_peaks_within_window() -> None:
 
     assert len(double_blink_times) == 1
     assert 3.25 <= double_blink_times[0] <= 3.45
+
+
+def test_engine_calibrate_adapts_thresholds_from_resting_baseline() -> None:
+    engine = FeedbackEngine(FeedbackConfig())
+    rng = np.random.default_rng(19)
+    samples = []
+    for i in range(250):  # 1.0 s calm baseline
+        t = i / 250.0
+        sig = 18.0 * np.sin(2.0 * np.pi * 10.0 * t) + rng.normal(0.0, 2.0, NUM_CHANNELS)
+        samples.append(
+            OctopusSample(timestamp=t, counter=i & 0xFF, channels_uv=tuple(float(v) for v in sig))
+        )
+
+    calibrated = engine.calibrate(samples)
+    assert calibrated["clench_rms_on_uv"] >= 18.0
+    assert calibrated["clench_rms_off_uv"] < calibrated["clench_rms_on_uv"]
+    assert calibrated["blink_peak_uv"] >= 65.0
+

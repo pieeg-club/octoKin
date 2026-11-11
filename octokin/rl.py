@@ -82,7 +82,10 @@ class HumanFeedbackWrapper(_BaseWrapper):
         """Record an explicit human preference/comfort rating (e.g. +1.0, -1.0) for the step."""
         self._pending_preference += float(score)
 
-    def reset(self, **kwargs: Any):
+    def reset(self, *, reset_engine: bool = False, **kwargs: Any):
+        if reset_engine:
+            self.engine.reset()
+        self._latest_frame = None
         self._pending_preference = 0.0
         self._had_intervention_since_step = False
         self._had_double_blink_since_step = False
@@ -94,10 +97,7 @@ class HumanFeedbackWrapper(_BaseWrapper):
 
         frame = self._latest_frame
         valid = bool(frame is not None and frame.contact_ok)
-        had_clench = self._had_intervention_since_step or (
-            frame is not None and frame.intervention
-        )
-        intervened = bool(valid and had_clench)
+        intervened = bool(valid and self._had_intervention_since_step)
         double_blink = bool(valid and self._had_double_blink_since_step)
         preference = self._pending_preference
 

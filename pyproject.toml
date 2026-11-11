@@ -69,6 +69,11 @@ Issues = "https://github.com/pieeg-club/octoKin/issues"
 [tool.setuptools.packages.find]
 include = ["octokin*"]
 
+[tool.setuptools.data-files]
+"share/ament_index/resource_index/packages" = ["resource/octokin"]
+"share/octokin" = ["package.xml"]
+"share/octokin/launch" = ["launch/octokin.launch.py"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

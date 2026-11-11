@@ -200,21 +200,37 @@ def run_ros2_node(
     def _acquisition_worker() -> None:
         async def _loop() -> None:
             last_pub = 0.0
+            prev_intervention: bool | None = None
+            prev_contact_ok: bool | None = None
             async for sample in source:
                 if stop_event.is_set():
                     break
                 frame = engine.process(sample)
                 with lock:
                     arbitrator.update_feedback(frame)
+                    safe_scale = arbitrator.effective_speed_scale()
 
                 if pub_raw is not None:
                     raw_msg = Float32MultiArray()
                     raw_msg.data = [float(v) for v in sample.channels_uv]
                     pub_raw.publish(raw_msg)
 
+                safety_edge = (
+                    prev_intervention is not None and frame.intervention != prev_intervention
+                ) or (prev_contact_ok is not None and frame.contact_ok != prev_contact_ok)
+
+                # Immediately zero /cmd_vel on rising clench edge, contact loss, or blink pause
+                if (frame.intervention and prev_intervention is False) or (
+                    not frame.contact_ok and prev_contact_ok is True
+                ) or (frame.double_blink and safe_scale == 0.0):
+                    pub_cmd_vel.publish(Twist())
+
+                prev_intervention = frame.intervention
+                prev_contact_ok = frame.contact_ok
+
                 now = time.monotonic()
-                # Always publish immediately on discrete events (clench edge or double blink)
-                if frame.double_blink or (now - last_pub) >= min_pub_dt:
+                # Publish immediately on discrete safety/trigger events (clench/contact edge, blink)
+                if frame.double_blink or safety_edge or (now - last_pub) >= min_pub_dt:
                     last_pub = now
                     pub_quality.publish(Float32(data=float(frame.signal_quality)))
                     pub_speed.publish(Float32(data=float(frame.speed_scale)))
@@ -231,6 +247,14 @@ def run_ros2_node(
                     pub_json.publish(String(data=frame.to_json()))
 
         asyncio.run(_loop())
+
+    def _on_watchdog_timer() -> None:
+        with lock:
+            scale = arbitrator.effective_speed_scale()
+        if scale == 0.0:
+            pub_cmd_vel.publish(Twist())
+
+    node.create_timer(0.10, _on_watchdog_timer)
 
     worker = threading.Thread(target=_acquisition_worker, daemon=True)
     worker.start()

@@ -13,7 +13,7 @@ Converts raw 16-channel Octopus-16 samples into robot-safe control primitives:
 from __future__ import annotations
 
 import json
-from collections import deque
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 
 import numpy as np
@@ -46,7 +46,7 @@ class FeedbackConfig:
     # Double-blink EOG detector
     blink_peak_uv: float = 95.0
     blink_max_emg_uv: float = 24.0  # reject jaw clenches masquerading as blinks
-    blink_min_Channel_fraction: float = 0.25
+    blink_min_channel_fraction: float = 0.25
     blink_refractory_s: float = 0.16
     double_blink_window_s: float = 0.75
     double_blink_cooldown_s: float = 1.0
@@ -56,6 +56,11 @@ class FeedbackConfig:
     min_speed_scale: float = 0.25
     max_speed_scale: float = 1.00
     speed_ema_alpha: float = 0.15
+
+    @property
+    def blink_min_Channel_fraction(self) -> float:
+        """Backward-compatible alias for blink_min_channel_fraction."""
+        return self.blink_min_channel_fraction
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,9 +109,15 @@ class FeedbackEngine:
         self.tracker = PacketTracker(nominal_sps=self.config.sample_rate)
 
         self._sample_index = 0
-        self._raw_win = deque(maxlen=self.config.quality_window_samples)
-        self._eeg_win = deque(maxlen=self.config.quality_window_samples)
-        self._emg_sq_win = deque(maxlen=self.config.emg_window_samples)
+        self._q_cap = max(1, int(self.config.quality_window_samples))
+        self._emg_cap = max(1, int(self.config.emg_window_samples))
+        self._raw_ring = np.zeros((self._q_cap, NUM_CHANNELS), dtype=np.float64)
+        self._eeg_ring = np.zeros((self._q_cap, NUM_CHANNELS), dtype=np.float64)
+        self._emg_sq_ring = np.zeros((self._emg_cap, NUM_CHANNELS), dtype=np.float64)
+        self._q_len = 0
+        self._q_pos = 0
+        self._emg_len = 0
+        self._emg_pos = 0
 
         self._clench_active = False
         self._clench_streak = 0
@@ -124,9 +135,13 @@ class FeedbackEngine:
         self.dsp.reset()
         self.tracker.reset()
         self._sample_index = 0
-        self._raw_win.clear()
-        self._eeg_win.clear()
-        self._emg_sq_win.clear()
+        self._raw_ring.fill(0.0)
+        self._eeg_ring.fill(0.0)
+        self._emg_sq_ring.fill(0.0)
+        self._q_len = 0
+        self._q_pos = 0
+        self._emg_len = 0
+        self._emg_pos = 0
         self._clench_active = False
         self._clench_streak = 0
         self._last_single_blink_ts = -100.0
@@ -137,13 +152,47 @@ class FeedbackEngine:
         self._engagement_index = 0.50
         self._smoothed_speed = 0.65
 
+    def calibrate(self, samples: Iterable[OctopusSample]) -> dict[str, float]:
+        """Calibrate EMG/EOG trigger thresholds from a resting baseline sample stream."""
+        emg_medians: list[float] = []
+        eeg_p95s: list[float] = []
+        for s in samples:
+            frame = self.process(s)
+            if frame.contact_ok and not frame.jaw_clench:
+                emg_medians.append(frame.emg_rms_uv)
+                good_mask = np.asarray(frame.good_pin_mask, dtype=bool)
+                if np.any(good_mask) and self._q_len > 0:
+                    latest_idx = (self._q_pos - 1) % self._q_cap
+                    eeg_abs = np.abs(self._eeg_ring[latest_idx, good_mask])
+                    eeg_p95s.append(float(np.percentile(eeg_abs, 95)))
+
+        if emg_medians:
+            baseline_emg = float(np.median(emg_medians))
+            self.config.clench_rms_on_uv = round(max(18.0, baseline_emg * 4.5), 2)
+            self.config.clench_rms_off_uv = round(
+                max(10.0, self.config.clench_rms_on_uv * 0.57), 2
+            )
+            self.config.blink_max_emg_uv = round(
+                max(15.0, self.config.clench_rms_on_uv * 0.85), 2
+            )
+        if eeg_p95s:
+            baseline_eeg_peak = float(np.median(eeg_p95s))
+            self.config.blink_peak_uv = round(max(65.0, baseline_eeg_peak * 4.0), 2)
+
+        return {
+            "clench_rms_on_uv": self.config.clench_rms_on_uv,
+            "clench_rms_off_uv": self.config.clench_rms_off_uv,
+            "blink_max_emg_uv": self.config.blink_max_emg_uv,
+            "blink_peak_uv": self.config.blink_peak_uv,
+        }
+
     def _evaluate_contact(self) -> tuple[np.ndarray, float]:
         """Return (good_pin_bool_array, overall_signal_quality_0_to_1)."""
-        raw_arr = np.asarray(self._raw_win, dtype=np.float64)  # (W, 16)
-        eeg_arr = np.asarray(self._eeg_win, dtype=np.float64)  # (W, 16)
+        raw_arr = self._raw_ring[: self._q_len]
+        eeg_arr = self._eeg_ring[: self._q_len]
 
         not_railed = np.max(np.abs(raw_arr), axis=0) < RAIL_THRESHOLD_UV
-        if raw_arr.shape[0] < 16:
+        if self._q_len < 16:
             good_pins = not_railed
         else:
             eeg_std = np.std(eeg_arr, axis=0)
@@ -164,12 +213,12 @@ class FeedbackEngine:
 
     def _detect_jaw_clench(self, good_pins: np.ndarray) -> tuple[bool, float]:
         """Detect sustained high-frequency EMG burst across seated pins."""
-        if not self._emg_sq_win or int(np.sum(good_pins)) == 0:
+        if self._emg_len == 0 or int(np.sum(good_pins)) == 0:
             self._clench_streak = 0
             self._clench_active = False
             return False, 0.0
 
-        emg_rms_per_ch = np.sqrt(np.mean(np.asarray(self._emg_sq_win, dtype=np.float64), axis=0))
+        emg_rms_per_ch = np.sqrt(np.mean(self._emg_sq_ring[: self._emg_len], axis=0))
         valid_rms = emg_rms_per_ch[good_pins]
         median_rms = float(np.median(valid_rms))
 
@@ -209,7 +258,7 @@ class FeedbackEngine:
             self._pending_blink_ts = None
 
         peaking_pins = int(np.sum(np.abs(eeg_uv[good_pins]) >= self.config.blink_peak_uv))
-        required_pins = max(2, int(np.ceil(num_good * self.config.blink_min_Channel_fraction)))
+        required_pins = max(2, int(np.ceil(num_good * self.config.blink_min_channel_fraction)))
         if peaking_pins < required_pins:
             return False
 
@@ -234,9 +283,17 @@ class FeedbackEngine:
         self.tracker.update(sample.counter, sample.timestamp)
         filtered = self.dsp.step(sample.channels_uv)
 
-        self._raw_win.append(np.asarray(sample.channels_uv, dtype=np.float64))
-        self._eeg_win.append(filtered.eeg_uv.copy())
-        self._emg_sq_win.append(filtered.emg_uv**2)
+        self._raw_ring[self._q_pos] = sample.channels_uv
+        self._eeg_ring[self._q_pos] = filtered.eeg_uv
+        self._q_pos = (self._q_pos + 1) % self._q_cap
+        if self._q_len < self._q_cap:
+            self._q_len += 1
+
+        self._emg_sq_ring[self._emg_pos] = filtered.emg_uv**2
+        self._emg_pos = (self._emg_pos + 1) % self._emg_cap
+        if self._emg_len < self._emg_cap:
+            self._emg_len += 1
+
         self._sample_index += 1
 
         good_pins, signal_quality = self._evaluate_contact()
